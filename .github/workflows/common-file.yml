@@ -1,0 +1,90 @@
+# This is a basic workflow to help you get started with Actions
+
+name: common-workflow
+
+on:
+  workflow_call:
+    inputs:
+      username:
+        required: true
+        type: string
+    secrets:
+      MULESOFT_ACTION_USERNAME:
+        required: true
+      MULESOFT_ACTION_PASSWORD:
+        required: true
+      MULESOFT_CLIENT_ID:
+        required: true
+      MULESOFT_CLIENT_SECRET:
+        required: true
+        
+jobs:
+  build:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+
+steps:
+      - uses: actions/checkout@v3
+      
+      - name: Generate Token
+        run: | 
+          response=$(curl --location --request POST 'https://anypoint.mulesoft.com/accounts/login' --header 'Content-Type:application/x-www-form-urlencoded' --data-urlencode 'username=${{ secrets.ANYPOINT_USERNAME }}' --data-urlencode 'password=${{ secrets.ANYPOINT_PASSWORD }}')
+          tkon=$(echo $response | jq '.access_token')
+          echo "token=$(echo "$tkon" | tr -d '"')" >> $GITHUB_ENV
+          
+      - name: Fetch Details
+        run: |
+          echo "assetLink=$(cat package.json | jq '.assetLink' | tr -d '"')" >> $GITHUB_ENV
+          echo "packageId=$(cat package.json | jq '.name' | tr -d '"')" >> $GITHUB_ENV
+                         
+      - name: Get API from Exchange
+        run : |
+          response=$(curl --location --request GET 'https://anypoint.mulesoft.com/exchange/api/v1/assets?search=${{ env.packageId}}&type=rest-api' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json')
+          getId=$(echo $response | jq '[.[].assetId][0]')
+          echo "assetId=$(echo "$getId" | tr -d '"')" >> $GITHUB_ENV
+          getVersion=$(echo $response | jq '[.[].version][0]')
+          echo "version=$(echo "$getVersion" | tr -d '"')" >> $GITHUB_ENV
+          
+      - name: Create Api Instance
+        id: main
+        run : |
+          echo $assetId
+          echo $apiVersion
+          response=$(curl --location --request POST 'https://anypoint.mulesoft.com/apimanager/api/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis' --header 'authorization: bearer ${{ env.token}}' --header 'content-type: application/json' --data-raw '{"endpoint": { "type": "rest-api", "uri": "${{ env.assetLink}}", "proxyUri": "http://0.0.0.0:8081/proxy", "scheme": "http", "isCloudHub": false, "deploymentType": "RF" }, "technology": "mule4",  "instanceLabel": "proxy-demo", "spec": { "assetId": "${{ env.assetId}}", "version": "${{ env.version}}", "groupId": "${{ secrets.GROUP_ID }}" } }')
+          echo $response
+          echo "var=$(echo $response | jq '.name' | tr -d '"')" >> $GITHUB_ENV
+          
+          
+      - name: GET APIID
+        run: |
+          response=$(curl --location --request GET 'https://anypoint.mulesoft.com/apimanager/api/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis?assetId=${{ env.packageId}}' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json' --data-raw '')
+          echo $response
+          getid=$(echo $response | jq '.assets[0].apis[0].id')
+          echo "apiId=$(echo "$getid" | tr -d '"')" >> $GITHUB_ENV
+          
+      - name: Update existing api
+        if: (env.var == 'ConflictError')
+        run: |
+          response=$(curl --location --request PATCH 'https://anypoint.mulesoft.com/apimanager/api/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis/${{ env.apiId}}' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json' --data-raw '{ "assetVersion" : "${{ env.version}}" }')
+          echo $response
+        
+      - name: Deploy Proxy
+        run : |
+          response=$(curl --location --request POST 'https://anypoint.mulesoft.com/proxies/xapi/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis/${{ env.apiId}}/deployments' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json' --data-raw '{ "type":"RF", "name":"${{ env.assetId}}", "overwrite": true, "target": {  "targetId":"${{ secrets.TARGET_ID }}", "deploymentSettings": { "runtimeVersion":"4.4.0" } } }')
+          echo $response
+          
+      - name: Get ProxyId
+        if: (env.var == 'ConflictError')
+        run: |
+          response=$(curl --location --request GET 'https://anypoint.mulesoft.com/proxies/xapi/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis/${{ env.apiId}}/deployments' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json' --data-raw '')
+          echo $response
+          getid=$(echo $response | jq '.[].id')
+          echo "proxyId=$(echo "$getid" | tr -d '"')" >> $GITHUB_ENV
+        
+      - name: Redeploy Proxy
+        if: (env.var == 'ConflictError')
+        run : |
+          response=$(curl --location --request PATCH 'https://anypoint.mulesoft.com/proxies/xapi/v1/organizations/${{ secrets.ORGANIZATION_ID }}/environments/${{ secrets.ENVIRONMENT_ID }}/apis/${{ env.apiId}}/deployments/${{ env.proxyId}}' --header 'Authorization: Bearer ${{ env.token}}' --header 'Content-Type: application/json' --data-raw '{ "type":"RF", "name":"${{ env.assetId}}", "overwrite": true, "target": {  "targetId":"${{ secrets.TARGET_ID }}", "deploymentSettings": { "runtimeVersion":"4.4.0" } } }')
+          echo $response
